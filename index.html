@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#eef1f5">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>IA hors ligne</title>
+<style>
+:root{
+  --bg:#eef1f5; --surface:#ffffff; --ink:#1b2230; --muted:#5d6678; --line:#d6dbe4;
+  --accent:#3552ff; --accent-ink:#ffffff; --ok:#1d7a4c; --warn:#a8570f;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#141821; --surface:#1d222d; --ink:#e8ebf2; --muted:#98a1b3; --line:#2c3341;
+         --accent:#7c93ff; --accent-ink:#10131c; --ok:#5fd39a; --warn:#f0a35e; color-scheme: dark; }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--ink);
+  font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:flex; flex-direction:column;
+  padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+}
+header{padding:12px 16px; border-bottom:1px solid var(--line); background:var(--surface)}
+.top{display:flex; align-items:center; justify-content:space-between; gap:12px}
+h1{font-size:1.05rem; margin:0; font-weight:650; letter-spacing:-.01em}
+#net{font-size:.8rem; padding:3px 10px; border-radius:999px; border:1px solid currentColor}
+#net.off{color:var(--ok)} #net.on{color:var(--warn)}
+.row{display:flex; gap:8px; margin-top:10px}
+select,button,textarea{font:inherit; color:inherit}
+.model{flex:1; align-self:center; color:var(--muted); font-size:.9rem}
+select{flex:1; min-width:0; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg)}
+button{border:0; border-radius:8px; padding:9px 16px; background:var(--accent); color:var(--accent-ink); font-weight:600}
+button:disabled{opacity:.45}
+button:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+progress{width:100%; height:4px; margin-top:10px; accent-color:var(--accent)}
+#status{font-size:.82rem; color:var(--muted); margin:6px 0 0; min-height:1.2em}
+main{flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:14px; -webkit-overflow-scrolling:touch}
+.msg{max-width:88%; white-space:pre-wrap; overflow-wrap:anywhere}
+.user{align-self:flex-end; background:var(--accent); color:var(--accent-ink); padding:9px 13px; border-radius:16px 16px 4px 16px}
+.bot{align-self:flex-start}
+.empty{margin:auto; text-align:center; color:var(--muted); max-width:28ch}
+footer{display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--line); background:var(--surface)}
+textarea{flex:1; resize:none; max-height:30vh; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--bg)}
+@media (prefers-reduced-motion: no-preference){ progress{transition:all .2s} }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>IA hors ligne</h1>
+    <span id="net" class="on">En ligne</span>
+  </div>
+  <div class="row">
+    <span class="model">Qwen 2.5 – 1,5B (~1 Go)</span>
+    <button id="load">Charger</button>
+  </div>
+  <progress id="bar" max="1" value="0" hidden></progress>
+  <p id="status">Charge un modèle une première fois avec du Wi‑Fi. Ensuite, tout marche sans réseau.</p>
+</header>
+
+<main id="chat"><p class="empty" id="hint">Aucune conversation. Charge un modèle, puis pose ta question.</p></main>
+
+<footer>
+  <textarea id="input" rows="1" placeholder="Écris ton message" disabled></textarea>
+  <button id="send" disabled>Envoyer</button>
+</footer>
+
+<script type="module">
+import * as webllm from "https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.79/+esm";
+
+const $ = s => document.querySelector(s);
+const chat = $("#chat"), input = $("#input"), sendBtn = $("#send"),
+      loadBtn = $("#load"), statusEl = $("#status"),
+      bar = $("#bar"), net = $("#net");
+
+const MODEL = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
+let engine = null, busy = false;
+const history = [{
+  role: "system",
+  content: "Tu es un assistant utile, clair et concis. Réponds en français sauf si on te demande une autre langue."
+}];
+
+// Indicateur de connexion
+function updateNet() {
+  const on = navigator.onLine;
+  net.textContent = on ? "En ligne" : "Hors ligne";
+  net.className = on ? "on" : "off";
+}
+addEventListener("online", updateNet); addEventListener("offline", updateNet); updateNet();
+
+// Service worker + stockage persistant (évite que le navigateur efface le modèle)
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+navigator.storage?.persist?.();
+
+if (!("gpu" in navigator)) {
+  statusEl.textContent = "WebGPU n'est pas disponible dans ce navigateur. Utilise Chrome récent (Android) ou Safari 26+ (iOS).";
+  loadBtn.disabled = true;
+}
+
+function addMsg(role, text = "") {
+  $("#hint")?.remove();
+  const d = document.createElement("div");
+  d.className = "msg " + role;
+  d.textContent = text;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+
+loadBtn.onclick = async () => {
+  loadBtn.disabled = true;
+  bar.hidden = false;
+  try {
+    engine = await webllm.CreateMLCEngine(MODEL, {
+      initProgressCallback: p => { statusEl.textContent = p.text; bar.value = p.progress; }
+    });
+    statusEl.textContent = "Modèle prêt. Il fonctionne maintenant sans connexion.";
+    bar.hidden = true;
+    input.disabled = sendBtn.disabled = false;
+    input.focus();
+  } catch (e) {
+    statusEl.textContent = "Échec du chargement : " + e.message + " (mémoire insuffisante ? ce modèle demande environ 2 Go de GPU)";
+    loadBtn.disabled = false;
+    bar.hidden = true;
+  }
+};
+
+async function send() {
+  const text = input.value.trim();
+  if (!text || !engine || busy) return;
+  busy = true; sendBtn.textContent = "Stop";
+  input.value = ""; input.style.height = "auto";
+  addMsg("user", text);
+  history.push({ role: "user", content: text });
+  if (history.length > 13) history.splice(1, history.length - 13); // garde le contexte court
+
+  const out = addMsg("bot", "…");
+  let reply = "";
+  try {
+    const stream = await engine.chat.completions.create({
+      messages: history, stream: true, temperature: 0.7, max_tokens: 512
+    });
+    for await (const chunk of stream) {
+      reply += chunk.choices[0]?.delta?.content ?? "";
+      out.textContent = reply || "…";
+      chat.scrollTop = chat.scrollHeight;
+    }
+    history.push({ role: "assistant", content: reply });
+  } catch (e) {
+    out.textContent = "Erreur : " + e.message;
+    history.pop();
+  }
+  busy = false; sendBtn.textContent = "Envoyer";
+}
+
+sendBtn.onclick = () => busy ? engine.interruptGenerate() : send();
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey && matchMedia("(pointer:fine)").matches) { e.preventDefault(); send(); }
+});
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, innerHeight * .3) + "px";
+});
+</script>
+</body>
+</html>
