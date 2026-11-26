@@ -56,7 +56,11 @@ textarea{flex:1; resize:none; max-height:30vh; padding:10px 12px; border:1px sol
     <span id="net" class="on">En ligne</span>
   </div>
   <div class="row">
-    <span class="model">Qwen 2.5 – 1,5B (~1 Go)</span>
+    <select id="model" aria-label="Modèle">
+      <option value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC" selected>Léger – Qwen 0,5B (~0,4 Go)</option>
+      <option value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Moyen – Llama 3.2 1B (~0,7 Go)</option>
+      <option value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">Gros – Qwen 1,5B (~1 Go)</option>
+    </select>
     <button id="load">Charger</button>
   </div>
   <progress id="bar" max="1" value="0" hidden></progress>
@@ -75,10 +79,9 @@ import * as webllm from "https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.79/+es
 
 const $ = s => document.querySelector(s);
 const chat = $("#chat"), input = $("#input"), sendBtn = $("#send"),
-      loadBtn = $("#load"), statusEl = $("#status"),
+      loadBtn = $("#load"), modelSel = $("#model"), statusEl = $("#status"),
       bar = $("#bar"), net = $("#net");
 
-const MODEL = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
 let engine = null, busy = false;
 const history = [{
   role: "system",
@@ -102,6 +105,14 @@ if (!("gpu" in navigator)) {
   loadBtn.disabled = true;
 }
 
+try {
+  if (localStorage.getItem("loading")) {
+    localStorage.removeItem("loading");
+    modelSel.selectedIndex = 0;
+    statusEl.textContent = "Le dernier chargement a planté (mémoire insuffisante). Essaie le modèle Léger.";
+  }
+} catch {}
+
 function addMsg(role, text = "") {
   $("#hint")?.remove();
   const d = document.createElement("div");
@@ -113,19 +124,22 @@ function addMsg(role, text = "") {
 }
 
 loadBtn.onclick = async () => {
-  loadBtn.disabled = true;
+  loadBtn.disabled = modelSel.disabled = true;
   bar.hidden = false;
+  try { localStorage.setItem("loading", "1"); } catch {}
   try {
-    engine = await webllm.CreateMLCEngine(MODEL, {
+    engine = await webllm.CreateMLCEngine(modelSel.value, {
       initProgressCallback: p => { statusEl.textContent = p.text; bar.value = p.progress; }
     });
+    try { localStorage.removeItem("loading"); } catch {}
     statusEl.textContent = "Modèle prêt. Il fonctionne maintenant sans connexion.";
     bar.hidden = true;
     input.disabled = sendBtn.disabled = false;
     input.focus();
   } catch (e) {
     statusEl.textContent = "Échec du chargement : " + e.message + " (mémoire insuffisante ? ce modèle demande environ 2 Go de GPU)";
-    loadBtn.disabled = false;
+    try { localStorage.removeItem("loading"); } catch {}
+    loadBtn.disabled = modelSel.disabled = false;
     bar.hidden = true;
   }
 };
